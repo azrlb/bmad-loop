@@ -1639,6 +1639,25 @@ def test_rollback_resolved_cause_auto_recovers_when_off(project):
     assert "rollback-auto" in flow.journal.events()
 
 
+def test_resolved_retry_preserves_exact_admitted_spec_outside_bmad_output(project):
+    repo = project.project
+    task = _task(repo)
+    spec = repo / "qualification" / "autopilot" / "one" / "stories" / "1-1-a-fix.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("---\nstatus: ready-for-dev\n---\n\napproved correction\n")
+    git(repo, "add", "--", str(spec.relative_to(repo)))
+    git(repo, "commit", "-qm", "carry approved story spec")
+    task.spec_file = str(spec)
+    task.rearmed = True
+    flow = _make_flow(workspace=Workspace.default(project),
+                      policy=_policy(rollback_on_failure=False))
+
+    flow.rollback_or_pause(task, cause="resolved")
+
+    assert spec.read_text().endswith("approved correction\n")
+    assert "rollback-auto" in flow.journal.events()
+
+
 def test_rollback_dirty_check_git_fault_degrades_to_dirty(project, monkeypatch):
     # #156: an un-determinable dirty check assumes dirty — OFF then pauses rather
     # than skip-clean, and never crashes.

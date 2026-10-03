@@ -5129,6 +5129,26 @@ def test_safe_rollback_preserves_tracked_artifact(project):
     assert spec.read_text() == "frozen: corrected\n"  # spec correction preserved
 
 
+def test_safe_rollback_preserves_clean_committed_owned_spec(project):
+    """A clean post-baseline carry commit must not disappear on resolved reset."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    spec = repo / "qualification" / "stories" / "one-correction.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("---\nstatus: ready-for-dev\n---\n\napproved correction\n")
+    git(repo, "add", "--", "qualification/stories/one-correction.md")
+    git(repo, "commit", "-qm", "carry approved story spec")
+    assert not verify.untracked_files(repo)
+
+    verify.safe_rollback(
+        repo, baseline, baseline_untracked=[],
+        keep=(".bmad-loop", "qualification/stories/one-correction.md"),
+        preserve=("qualification/stories/one-correction.md",),
+        preserve_committed=True,
+    )
+    assert spec.read_text().endswith("approved correction\n")
+
+
 def test_safe_rollback_preserves_tracked_artifact_deletion(project):
     """A protected snapshot is authoritative when it deletes a tracked artifact.
 
@@ -8461,6 +8481,49 @@ def test_verify_dev_refuses_proof_of_work_only_the_project_tree_holds(project, t
     out = verify.verify_dev(task, paths, dev_result(sp))
     assert not out.ok
     assert out.reason == "no changes in worktree since baseline commit"
+
+
+def test_resolved_redrive_counts_committed_correction_without_waiving_proof(project):
+    """A rearmed story may have received its code fix before its dev session."""
+    task = make_task(project)
+    original = task.baseline_commit
+    (project.project / "src" / "correction.py").parent.mkdir(exist_ok=True)
+    (project.project / "src" / "correction.py").write_text("corrected = True\n")
+    git(project.project, "add", "src/correction.py")
+    git(project.project, "commit", "-m", "Reviewed correction")
+    task.baseline_commit = verify.rev_parse_head(project.project)
+    write_sprint(project, {task.story_key: "review"})
+    sp = spec_path(project, task.story_key)
+    write_spec(sp, "in-review", task.baseline_commit)
+
+    ordinary = verify.verify_dev(task, project, dev_result(sp))
+    assert not ordinary.ok
+    assert ordinary.reason == "no changes in worktree since baseline commit"
+
+    task.resolved_redrive = True
+    task.resolved_proof_baseline = original
+    assert verify.verify_dev(task, project, dev_result(sp)).ok
+
+    task.resolved_redrive = False
+    assert not verify.verify_dev(task, project, dev_result(sp)).ok
+
+
+def test_resolved_redrive_does_not_credit_spec_only_or_invalid_baseline(project):
+    task = make_task(project)
+    original = task.baseline_commit
+    write_sprint(project, {task.story_key: "review"})
+    sp = spec_path(project, task.story_key)
+    write_spec(sp, "in-review", original)
+    task.resolved_redrive = True
+    task.resolved_proof_baseline = original
+    no_code = verify.verify_dev(task, project, dev_result(sp))
+    assert not no_code.ok
+    assert no_code.reason == "no changes in worktree since baseline commit"
+
+    task.resolved_proof_baseline = "0" * 40
+    invalid = verify.verify_dev(task, project, dev_result(sp))
+    assert not invalid.ok
+    assert invalid.reason == "resolved correction proof baseline invalid"
 
 
 def test_verify_dev_exclude_relpaths_follows_the_root_it_is_given(project, tmp_path):

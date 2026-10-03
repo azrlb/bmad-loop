@@ -268,7 +268,7 @@ class RecoveryFlow:
                 out.append(rel)
         return tuple(out)
 
-    def _attempt_owned_spec(self, task: StoryTask) -> tuple[Path, str | None] | None:
+    def _attempt_owned_spec(self, task: StoryTask, *, resolved: bool = False) -> tuple[Path, str | None] | None:
         """Bind recovery restoration to this attempt's spec and exact Git exclusion.
 
         This is the restore authority for the dispatched attempt, not an ordinary
@@ -287,11 +287,18 @@ class RecoveryFlow:
         root configured outside the Git workspace remains a trusted repair target,
         but cannot contribute a pathspec to a Git command running in the workspace.
         """
-        if not task.dispatched_spec_file:
+        spec_name = task.dispatched_spec_file
+        if (not spec_name and resolved and task.rearmed and task.spec_file
+                and Path(task.spec_file).name.startswith(task.story_key + "-")):
+            # An escalation before planning has no dispatched-spec snapshot.
+            # `resolve` still records the exact rearmed story spec, which must
+            # survive its first reset after a reviewed external correction.
+            spec_name = task.spec_file
+        if not spec_name:
             return None
 
         workspace = self._workspace_get()
-        raw = Path(task.dispatched_spec_file)
+        raw = Path(spec_name)
         candidates = (
             (raw,)
             if raw.is_absolute()
@@ -1078,9 +1085,12 @@ class RecoveryFlow:
         redrive = resolved or task.resolved_redrive
         # Whole-folder protection is reset-only. Attempt recognition below gets
         # at most one literal regular-file exclusion from the attempt binding.
-        protected = self.protected_relpaths() if redrive else ()
-        owned_spec = self._attempt_owned_spec(task)
+        owned_spec = self._attempt_owned_spec(task, resolved=resolved)
         owned_exclude = (owned_spec[1],) if owned_spec and owned_spec[1] else ()
+        # A controller may admit a story spec outside the configured BMAD
+        # artifact folders. Protect only the exact attempt-bound regular file,
+        # never the whole external folder, across a resolved re-drive.
+        protected = (*self.protected_relpaths(), *owned_exclude) if redrive else ()
         # Un-determinable dirty check (git timeout/failure, #156) ⇒ assume dirty:
         # never skip recovery on an unproven "clean", never crash the run. The
         # normal branching below then decides — OFF pauses (worktree kept), ON /
@@ -1816,13 +1826,15 @@ class RecoveryFlow:
         A cleanup-preflight refusal is journaled and routed through the injected
         pause before the re-drive can continue."""
         workspace = self._workspace_get()
+        preserve_committed = bool(preserve and task.rearmed)
         try:
             verify.safe_rollback(
                 workspace.root,
                 task.baseline_commit or "",
                 baseline_untracked=task.baseline_untracked,
-                keep=(".bmad-loop", *self.protected_relpaths()),
+                keep=(".bmad-loop", *self.protected_relpaths(), *preserve),
                 preserve=preserve,
+                preserve_committed=preserve_committed,
             )
         except verify.RollbackPreflightError as e:
             self.journal.append("rollback-reset-failed", story_key=task.story_key, error=str(e))
