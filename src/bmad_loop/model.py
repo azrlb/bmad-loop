@@ -232,6 +232,10 @@ class StoryTask:
     # done spec); otherwise it skips it.
     followup_review_recommended: bool = False
     baseline_commit: str | None = None
+    # Original code baseline of a resolved escalation whose independently
+    # reviewed correction was committed before the native re-drive.  This is proof-of-work only: the
+    # normal baseline_commit still owns rollback and finalization.
+    resolved_proof_baseline: str | None = None
     # untracked, non-ignored paths present at baseline capture (repo-relative
     # posix). On rollback only paths NOT in this set are removed, so files the
     # user already had on disk are never deleted. None = pre-upgrade run (no
@@ -429,6 +433,7 @@ class StoryTask:
             "escalations_resolved_upto": self.escalations_resolved_upto,
             "followup_review_recommended": self.followup_review_recommended,
             "baseline_commit": self.baseline_commit,
+            "resolved_proof_baseline": self.resolved_proof_baseline,
             "baseline_untracked": self.baseline_untracked,
             "baseline_ledger_digest": self.baseline_ledger_digest,
             "pre_harvest_ledger": self.pre_harvest_ledger,
@@ -620,6 +625,7 @@ class StoryTask:
             escalations_resolved_upto=int(d.get("escalations_resolved_upto", 0)),
             followup_review_recommended=bool(d.get("followup_review_recommended", False)),
             baseline_commit=d.get("baseline_commit"),
+            resolved_proof_baseline=d.get("resolved_proof_baseline"),
             baseline_untracked=(
                 [str(p) for p in d["baseline_untracked"]]
                 if d.get("baseline_untracked") is not None

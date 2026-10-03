@@ -3899,10 +3899,14 @@ def test_rearm_warns_about_commits_below_the_refreshed_baseline(tmp_path):
     git(tmp_path, "commit", "-q", "-m", "attempt commit")
     old_baseline = load_state(run_dir).tasks["1-1-a"].baseline_commit
 
-    outcome = runs.rearm_escalation(run_dir, isolated_redrive=False, resolution_recorded=True)
+    outcome = runs.rearm_escalation(
+        run_dir, isolated_redrive=False, resolution_recorded=True,
+        reviewed_correction_base=old_baseline,
+    )
 
     task = load_state(run_dir).tasks["1-1-a"]
     assert task.baseline_commit != old_baseline  # baseline advanced past the commit
+    assert task.resolved_proof_baseline == old_baseline
     warned = _kinds(run_dir, "stale-restore-commits")
     assert len(warned) == 1
     assert warned[0]["old_baseline"] == old_baseline
@@ -3947,6 +3951,7 @@ def test_rearm_survives_a_git_fault_reading_commits_above_the_old_baseline(tmp_p
     assert task.generation == initial_generation + 1
     assert task.restore_patch is None
     assert task.baseline_commit == git(tmp_path, "rev-parse", "HEAD")
+    assert task.resolved_proof_baseline is None  # invalid old object cannot authorize work
     assert not _kinds(run_dir, "stale-restore-commits")  # the probe never answered...
     probe = _kinds(run_dir, "rearm-commits-probe-failed")  # ...and now says so
     assert len(probe) == 1
@@ -4766,8 +4771,37 @@ def test_ordinary_rearm_writes_no_abort_record(tmp_path):
 
     assert not _kinds(run_dir, "rearm-aborted")
     assert load_state(run_dir).tasks["1-1-a"].phase == Phase.PENDING
+    assert load_state(run_dir).tasks["1-1-a"].resolved_proof_baseline is None
     assert "## Auto Run Result" not in spec.read_text(encoding="utf-8")
     assert "status: ready-for-dev" in spec.read_text(encoding="utf-8")
+
+
+def test_reviewed_correction_base_cannot_authorize_unchanged_or_foreign_code(tmp_path):
+    from bmad_loop import journal as journal_mod
+
+    run_dir, spec, _patch = _stale_restore_tree(tmp_path)
+    state = load_state(run_dir)
+    state.tasks["1-1-a"].baseline_commit = git(tmp_path, "rev-parse", "HEAD")
+    save_state(run_dir, state)
+    before = (run_dir / journal_mod.STATE_FILE).read_bytes()
+    spec_before = spec.read_bytes()
+    original = load_state(run_dir).tasks["1-1-a"].baseline_commit
+
+    with pytest.raises(runs.RearmError, match="no reachable committed code base"):
+        runs.rearm_escalation(
+            run_dir, isolated_redrive=False, resolution_recorded=True,
+            reviewed_correction_base=original,
+        )
+    assert (run_dir / journal_mod.STATE_FILE).read_bytes() == before
+    assert spec.read_bytes() == spec_before
+
+    with pytest.raises(runs.RearmError, match="does not match"):
+        runs.rearm_escalation(
+            run_dir, isolated_redrive=False, resolution_recorded=True,
+            reviewed_correction_base="f" * 40,
+        )
+    assert (run_dir / journal_mod.STATE_FILE).read_bytes() == before
+    assert spec.read_bytes() == spec_before
 
 
 def test_archive_run(tmp_path):

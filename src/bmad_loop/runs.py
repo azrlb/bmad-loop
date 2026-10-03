@@ -4240,6 +4240,7 @@ def rearm_escalation(
     isolated_redrive: bool,
     resolution_recorded: bool,
     project_root: Path | None = None,
+    reviewed_correction_base: str | None = None,
 ) -> RearmOutcome:
     """Run the complete spec/git/state re-arm transaction under the run lock."""
     with state_lock(run_dir):
@@ -4250,6 +4251,7 @@ def rearm_escalation(
             isolated_redrive=isolated_redrive,
             resolution_recorded=resolution_recorded,
             project_root=project_root,
+            reviewed_correction_base=reviewed_correction_base,
         )
 
 
@@ -4261,6 +4263,7 @@ def _rearm_escalation_locked(
     isolated_redrive: bool,
     resolution_recorded: bool,
     project_root: Path | None = None,
+    reviewed_correction_base: str | None = None,
 ) -> RearmOutcome:
     """Re-arm an escalation-paused story so the next resume re-drives it.
 
@@ -4415,6 +4418,9 @@ def _rearm_escalation_locked(
     # attempt this re-arm is abandoning, and the residue block needs both.
     old_latch = task.restore_patch
     old_baseline = task.baseline_commit
+    if reviewed_correction_base is not None and reviewed_correction_base != old_baseline:
+        raise RearmError("reviewed correction base does not match the escalated story baseline")
+    task.resolved_proof_baseline = None
     # deliberate reset, not a normal state-machine transition (mirrors
     # engine._finish_inflight): a clean re-attempt against the corrected spec.
     task.phase = Phase.PENDING
@@ -4945,6 +4951,17 @@ def _rearm_escalation_locked(
             )
         else:
             task.baseline_commit = head
+            # A resolve may have already committed the independently reviewed
+            # product correction. Keep its original reference for the re-drive's
+            # proof gate, without moving the rollback/finalization baseline.
+            task.resolved_proof_baseline = (
+                old_baseline
+                if (reviewed_correction_base is not None and old_baseline != head
+                    and verify.is_ancestor(repo, old_baseline, head))
+                else None
+            )
+            if reviewed_correction_base is not None and task.resolved_proof_baseline is None:
+                raise RearmError("reviewed correction has no reachable committed code base")
             task.baseline_untracked = untracked
             advanced = True
 

@@ -3713,7 +3713,9 @@ def _verify_shared_gates(
                     )
                 )
 
-    def proof_of_work_probe(mode_exclude: tuple[str, ...]) -> bool | None:
+    def proof_of_work_probe(
+        mode_exclude: tuple[str, ...], *, resolved_baseline: str | None = None
+    ) -> bool | None:
         """The one place proof-of-work is measured, called by BOTH arms below.
 
         The gate arm and the observation arm differ in exactly one input — which
@@ -3743,13 +3745,13 @@ def _verify_shared_gates(
         """
         return _changes_since(
             paths.repo_root,
-            proof_baseline,
+            resolved_baseline or proof_baseline,
             exclude=verify_dev_exclude_relpaths(
                 paths, spec_path, task.restore_patch, root=paths.repo_root
             )
             + mode_exclude,
             baseline_untracked=task.baseline_untracked,
-            include_untracked=include_untracked_proof,
+            include_untracked=False if resolved_baseline else include_untracked_proof,
         )
 
     if extra_exclude is not None and task.baseline_commit:
@@ -3758,7 +3760,26 @@ def _verify_shared_gates(
             # positively answered "nothing changed" refuses the attempt, so a git
             # REFUSAL (`None`) keeps the stricter path exactly as it did when this
             # arm called `has_changes_since` and let that function collapse it.
-            if proof_of_work_probe(extra_exclude) is False:
+            ordinary_proof = proof_of_work_probe(extra_exclude)
+            if ordinary_proof is False:
+                # A resolved escalation can carry product code committed before
+                # its re-drive. The controller reviews that exact correction;
+                # the engine still demands a real code diff, measured from the
+                # original baseline only when the re-arm recorded it. The
+                # corrected baseline remains authoritative for rollback and
+                # finalization. An invalid or unanswerable reference never
+                # supplies a PASS here.
+                old = task.resolved_proof_baseline
+                if task.resolved_redrive and old:
+                    canonical_old = _canonical_commit_oid(paths.repo_root, old)
+                    if (canonical_old != old
+                            or not is_ancestor(paths.repo_root, old, task.baseline_commit)
+                            or proof_baseline != task.baseline_commit):
+                        return _SharedGateResult(
+                            VerifyOutcome.retry("resolved correction proof baseline invalid")
+                        )
+                    if proof_of_work_probe(extra_exclude, resolved_baseline=old) is True:
+                        return _SharedGateResult()
                 return _SharedGateResult(
                     VerifyOutcome.retry("no changes in worktree since baseline commit")
                 )

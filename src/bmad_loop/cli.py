@@ -3435,6 +3435,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
                 # run was LAUNCHED and nothing re-stamps it, so a moved project would have
                 # the agent edit one file and the re-arm flip another.
                 project_root=project,
+                **({"reviewed_correction_base": args.reviewed_correction_base}
+                   if getattr(args, "reviewed_correction_base", None) else {}),
             )
     except runs.RearmError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -5040,6 +5042,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     resolve_p.add_argument("run_id")
     resolve_p.add_argument("--story", help="story key to resolve (default: the paused one)")
+    resolve_p.add_argument(
+        "--reviewed-correction-base", metavar="SHA",
+        help="original story commit for a separately reviewed, already-committed correction",
+    )
     resolve_p.add_argument(
         "--no-interactive",
         dest="interactive",
