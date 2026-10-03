@@ -396,9 +396,12 @@ class RecoveryFlow:
         redrive = resolved or task.resolved_redrive
         # Whole-folder protection is reset-only. Attempt recognition below gets
         # at most one literal regular-file exclusion from the attempt binding.
-        protected = self.protected_relpaths() if redrive else ()
         owned_spec = self._attempt_owned_spec(task)
         owned_exclude = (owned_spec[1],) if owned_spec and owned_spec[1] else ()
+        # A controller may admit a story spec outside the configured BMAD
+        # artifact folders. Protect only the exact attempt-bound regular file,
+        # never the whole external folder, across a resolved re-drive.
+        protected = (*self.protected_relpaths(), *owned_exclude) if redrive else ()
         # Un-determinable dirty check (git timeout/failure, #156) ⇒ assume dirty:
         # never skip recovery on an unproven "clean", never crash the run. The
         # normal branching below then decides — OFF pauses (worktree kept), ON /
@@ -1071,13 +1074,16 @@ class RecoveryFlow:
         A cleanup-preflight refusal is journaled and routed through the injected
         pause before the re-drive can continue."""
         workspace = self._workspace_get()
+        owned_spec = self._attempt_owned_spec(task)
+        preserve_committed = bool(owned_spec and owned_spec[1] in preserve)
         try:
             verify.safe_rollback(
                 workspace.root,
                 task.baseline_commit or "",
                 baseline_untracked=task.baseline_untracked,
-                keep=(".bmad-loop", *self.protected_relpaths()),
+                keep=(".bmad-loop", *self.protected_relpaths(), *preserve),
                 preserve=preserve,
+                preserve_committed=preserve_committed,
             )
         except verify.RollbackPreflightError as e:
             self.journal.append("rollback-reset-failed", story_key=task.story_key, error=str(e))

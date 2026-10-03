@@ -1917,6 +1917,7 @@ def safe_rollback(
     baseline_untracked: list[str] | None,
     keep: tuple[str, ...] = (".bmad-loop",),
     preserve: tuple[str, ...] = (),
+    preserve_committed: bool = False,
 ) -> None:
     """Undo a failed attempt WITHOUT a blanket `git clean`.
 
@@ -1982,6 +1983,16 @@ def safe_rollback(
     if rc != 0 and preserve:
         raise GitError(f"git stash create failed in {repo}: {detail}")
     snapshot = out if rc == 0 else ""
+    if preserve and preserve_committed and not snapshot:
+        # `git stash create` is empty on a clean checkout even when HEAD has
+        # commits above the attempt baseline. Those commits can contain the
+        # independently approved corrected spec; snapshot HEAD itself before
+        # resetting so the protected path is not silently lost.
+        rc, current_head, detail = _git_out(repo, "rev-parse", "HEAD")
+        if rc != 0:
+            raise GitError(f"git rev-parse HEAD failed in {repo}: {detail}")
+        if current_head != baseline:
+            snapshot = current_head
     deleted_preserve_paths: tuple[str, ...] = ()
     if snapshot and preserve:
         proc = _run_git(

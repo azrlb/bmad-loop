@@ -3972,6 +3972,26 @@ def test_safe_rollback_preserves_tracked_artifact(project):
     assert spec.read_text() == "frozen: corrected\n"  # spec correction preserved
 
 
+def test_safe_rollback_preserves_clean_committed_owned_spec(project):
+    """A clean post-baseline carry commit must not disappear on resolved reset."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    spec = repo / "qualification" / "stories" / "one-correction.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("---\nstatus: ready-for-dev\n---\n\napproved correction\n")
+    git(repo, "add", "--", "qualification/stories/one-correction.md")
+    git(repo, "commit", "-qm", "carry approved story spec")
+    assert not verify.untracked_files(repo)
+
+    verify.safe_rollback(
+        repo, baseline, baseline_untracked=[],
+        keep=(".bmad-loop", "qualification/stories/one-correction.md"),
+        preserve=("qualification/stories/one-correction.md",),
+        preserve_committed=True,
+    )
+    assert spec.read_text().endswith("approved correction\n")
+
+
 def test_safe_rollback_preserves_tracked_artifact_deletion(project):
     """A protected snapshot is authoritative when it deletes a tracked artifact.
 
