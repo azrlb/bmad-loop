@@ -144,6 +144,14 @@ def test_run_state_stories_fields_default_when_absent_from_dict():
     assert back.source == "sprint-status" and back.spec_folder == ""
 
 
+def test_resolved_correction_proof_baseline_survives_state_reload():
+    task = StoryTask(story_key="1-1-a", epic=1, resolved_proof_baseline="a" * 40)
+    assert StoryTask.from_dict(task.to_dict()).resolved_proof_baseline == "a" * 40
+    older = task.to_dict()
+    del older["resolved_proof_baseline"]
+    assert StoryTask.from_dict(older).resolved_proof_baseline is None
+
+
 def test_sweeps_refused_round_trips():
     """#501's visibility record: trigger -> a closed SWEEP_REFUSED_* slug.
 

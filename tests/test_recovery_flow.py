@@ -1647,7 +1647,8 @@ def test_resolved_retry_preserves_exact_admitted_spec_outside_bmad_output(projec
     spec.write_text("---\nstatus: ready-for-dev\n---\n\napproved correction\n")
     git(repo, "add", "--", str(spec.relative_to(repo)))
     git(repo, "commit", "-qm", "carry approved story spec")
-    task.dispatched_spec_file = str(spec)
+    task.spec_file = str(spec)
+    task.rearmed = True
     flow = _make_flow(workspace=Workspace.default(project),
                       policy=_policy(rollback_on_failure=False))
 

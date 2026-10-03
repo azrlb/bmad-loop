@@ -268,7 +268,7 @@ class RecoveryFlow:
                 out.append(rel)
         return tuple(out)
 
-    def _attempt_owned_spec(self, task: StoryTask) -> tuple[Path, str | None] | None:
+    def _attempt_owned_spec(self, task: StoryTask, *, resolved: bool = False) -> tuple[Path, str | None] | None:
         """Bind recovery restoration to this attempt's spec and exact Git exclusion.
 
         This is the restore authority for the dispatched attempt, not an ordinary
@@ -287,11 +287,18 @@ class RecoveryFlow:
         root configured outside the Git workspace remains a trusted repair target,
         but cannot contribute a pathspec to a Git command running in the workspace.
         """
-        if not task.dispatched_spec_file:
+        spec_name = task.dispatched_spec_file
+        if (not spec_name and resolved and task.rearmed and task.spec_file
+                and Path(task.spec_file).name.startswith(task.story_key + "-")):
+            # An escalation before planning has no dispatched-spec snapshot.
+            # `resolve` still records the exact rearmed story spec, which must
+            # survive its first reset after a reviewed external correction.
+            spec_name = task.spec_file
+        if not spec_name:
             return None
 
         workspace = self._workspace_get()
-        raw = Path(task.dispatched_spec_file)
+        raw = Path(spec_name)
         candidates = (
             (raw,)
             if raw.is_absolute()
@@ -1078,7 +1085,7 @@ class RecoveryFlow:
         redrive = resolved or task.resolved_redrive
         # Whole-folder protection is reset-only. Attempt recognition below gets
         # at most one literal regular-file exclusion from the attempt binding.
-        owned_spec = self._attempt_owned_spec(task)
+        owned_spec = self._attempt_owned_spec(task, resolved=resolved)
         owned_exclude = (owned_spec[1],) if owned_spec and owned_spec[1] else ()
         # A controller may admit a story spec outside the configured BMAD
         # artifact folders. Protect only the exact attempt-bound regular file,
@@ -1819,8 +1826,7 @@ class RecoveryFlow:
         A cleanup-preflight refusal is journaled and routed through the injected
         pause before the re-drive can continue."""
         workspace = self._workspace_get()
-        owned_spec = self._attempt_owned_spec(task)
-        preserve_committed = bool(owned_spec and owned_spec[1] in preserve)
+        preserve_committed = bool(preserve and task.rearmed)
         try:
             verify.safe_rollback(
                 workspace.root,

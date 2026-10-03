@@ -393,6 +393,10 @@ class StoryTask:
     # persisted with the identity so a replay needs no migrate-* record reads.
     migration_delivery_counts: dict[str, int] | None = None
     baseline_commit: str | None = None
+    # Original code baseline of a resolved escalation whose independently
+    # reviewed correction was committed before the native re-drive.  This is proof-of-work only: the
+    # normal baseline_commit still owns rollback and finalization.
+    resolved_proof_baseline: str | None = None
     # untracked, non-ignored paths present at baseline capture (repo-relative
     # posix). On rollback only paths NOT in this set are removed, so files the
     # user already had on disk are never deleted. None = pre-upgrade run (no
@@ -721,6 +725,7 @@ class StoryTask:
                 else None
             ),
             "baseline_commit": self.baseline_commit,
+            "resolved_proof_baseline": self.resolved_proof_baseline,
             "baseline_untracked": self.baseline_untracked,
             "baseline_artifacts": self.baseline_artifacts,
             "baseline_ledger_digest": self.baseline_ledger_digest,
@@ -975,6 +980,7 @@ class StoryTask:
                 else None
             ),
             baseline_commit=d.get("baseline_commit"),
+            resolved_proof_baseline=d.get("resolved_proof_baseline"),
             baseline_untracked=(
                 [str(p) for p in d["baseline_untracked"]]
                 if d.get("baseline_untracked") is not None

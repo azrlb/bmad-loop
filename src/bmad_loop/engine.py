@@ -4474,6 +4474,9 @@ class Engine:
             # is likewise committed, so clear its latch too — a subsequent re-arm
             # (if any) decides afresh whether to restore again.
             task.resolved_redrive = False
+            # Retain resolved_proof_baseline as a terminal audit anchor: the
+            # controller must be able to verify that final review included the
+            # externally corrected product code, not only this story commit.
             task.restore_patch = None
             # An adopted branch (DW-386) is likewise committed; its latch is spent.
             task.adopt_pending = False
