@@ -2540,6 +2540,7 @@ def _environment_retry_cli_case(paths):
     head = git(root, "rev-parse", "HEAD")
     held = escalated_run(root, baseline_commit=head, spec_file=str(spec))
     held.task.generation = 1
+    held.state.source = "stories"
     held.task.resolved_proof_baseline = original
     save_state(held.run_dir, held.state)
     state_sha = hashlib.sha256((held.run_dir / "state.json").read_bytes()).hexdigest()

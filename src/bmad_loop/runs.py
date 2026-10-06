@@ -4293,7 +4293,8 @@ def _validate_environment_retry(run_dir, state, task, retry, *, isolated_redrive
         isolated_redrive
         or task.worktree_path
         or task.restore_patch
-        or state.source != "sprint-status"
+        or state.source not in {"sprint-status", "stories"}
+        or task.sentinel_kind
         or not task.spec_file
         or state.paused_story_key != task.story_key
         or task.generation != retry.generation

@@ -4810,7 +4810,7 @@ def test_reviewed_correction_base_cannot_authorize_unchanged_or_foreign_code(tmp
     assert spec.read_bytes() == spec_before
 
 
-def _environment_retry_case(project):
+def _environment_retry_case(project, *, source="sprint-status"):
     import hashlib
 
     spec = project / "environment-spec.md"
@@ -4831,6 +4831,7 @@ def _environment_retry_case(project):
         review_cycle=2,
     )
     held.task.generation = 1
+    held.state.source = source
     held.task.resolved_proof_baseline = original
     held.task.followup_reviews_spent = 1
     save_state(held.run_dir, held.state)
@@ -4897,9 +4898,12 @@ def test_environment_retry_refuses_unverified_receipt(project, change):
     assert spec.read_bytes() == spec_before
 
 
-def test_environment_retry_retains_approved_code_and_sessions_but_reopens_fresh_review(project):
+@pytest.mark.parametrize("source", ["sprint-status", "stories"])
+def test_environment_retry_retains_approved_code_and_sessions_but_reopens_fresh_review(
+    project, source
+):
     project = project.project
-    held, spec, retry = _environment_retry_case(project)
+    held, spec, retry = _environment_retry_case(project, source=source)
     sessions = held.task.sessions
     result = runs.rearm_escalation(
         held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
@@ -4955,7 +4959,7 @@ def test_environment_retry_refuses_any_unclean_or_changed_candidate(project, cha
 
 
 @pytest.mark.parametrize(
-    "change", ["hash", "generation", "anchor", "baseline", "source", "paused_story"]
+    "change", ["hash", "generation", "anchor", "baseline", "source", "sentinel", "paused_story"]
 )
 def test_environment_retry_refuses_stale_state_or_foreign_lineage(project, change):
     """Ablation target: remove the exact-state/retained-anchor predicate."""
@@ -4973,7 +4977,9 @@ def test_environment_retry_refuses_stale_state_or_foreign_lineage(project, chang
         retry = replace(retry, head=retry.proof_baseline)
     else:
         if change == "source":
-            held.state.source = "stories"
+            held.state.source = "sweep"
+        elif change == "sentinel":
+            held.task.sentinel_kind = "unresolved"
         else:
             held.state.paused_story_key = "another-task"
         save_state(held.run_dir, held.state)
