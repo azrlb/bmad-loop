@@ -233,6 +233,11 @@ _JOURNAL_ALIAS_FIELDS = {
 # spec basename, so that known shape is aliased without making the same claim about a
 # future kind that reuses the generic name.
 _JOURNAL_KIND_ALIAS_FIELDS: dict[str, dict[str, str]] = {
+    "environment-review-rearm-intent": {
+        "proof_baseline": "commit",
+        "state_sha256": "evidence",
+        "receipt_sha256": "evidence",
+    },
     "unit-merge-started": {"target": "branch"},
     "unit-merged": {"target": "branch"},
     "resume-unit-merge": {"target": "branch"},

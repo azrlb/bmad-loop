@@ -334,6 +334,7 @@ for _routing_table in JOURNAL_KIND_ROUTING_TABLES:
 # which would also wave through a branch-carrying ``target`` on a kind nobody has
 # looked at — exactly the hole the flattening left.
 JOURNAL_KIND_BENIGN_FIELDS = {
+    "environment-review-rearm-intent": frozenset({"old_generation", "new_generation"}),
     "board-advance-carried": frozenset({"target"}),
     "board-advance-carry-failed": frozenset({"target"}),
     "board-advance-carry-foreign-dirt": frozenset({"target"}),
@@ -848,6 +849,7 @@ JOURNAL_KINDS = frozenset(
         "stale-restore-excluded",
         "stale-restore-unparseable",
         "story-escalation-resolved",
+        "environment-review-rearm-intent",
         # runsetup.py
         "composition-unwind-failed",
         "run-start",

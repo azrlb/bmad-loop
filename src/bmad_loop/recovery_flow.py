@@ -118,7 +118,9 @@ class RecoveryFlow:
                 out.append(rel)
         return tuple(out)
 
-    def _attempt_owned_spec(self, task: StoryTask, *, resolved: bool = False) -> tuple[Path, str | None] | None:
+    def _attempt_owned_spec(
+        self, task: StoryTask, *, resolved: bool = False
+    ) -> tuple[Path, str | None] | None:
         """Bind recovery restoration to this attempt's spec and exact Git exclusion.
 
         This is the restore authority for the dispatched attempt, not an ordinary
@@ -138,8 +140,13 @@ class RecoveryFlow:
         but cannot contribute a pathspec to a Git command running in the workspace.
         """
         spec_name = task.dispatched_spec_file
-        if (not spec_name and resolved and task.rearmed and task.spec_file
-                and Path(task.spec_file).name.startswith(task.story_key + "-")):
+        if (
+            not spec_name
+            and resolved
+            and task.rearmed
+            and task.spec_file
+            and Path(task.spec_file).name.startswith(task.story_key + "-")
+        ):
             # An escalation before planning has no dispatched-spec snapshot.
             # `resolve` still records the exact rearmed story spec, which must
             # survive its first reset after a reviewed external correction.
@@ -166,18 +173,18 @@ class RecoveryFlow:
                 # into an unrelated file that happens to share a trusted root.
                 if candidate.is_symlink():
                     return None
-                resolved = candidate.resolve()
-                if raw.is_absolute() and resolved != candidate:
+                resolved_path = candidate.resolve()
+                if raw.is_absolute() and resolved_path != candidate:
                     # Snapshot-bearing bindings are persisted canonically. A
                     # changed result here means a parent component was replaced
                     # by a symlink after launch, which is the same retargeting
                     # hazard as a link at the final component.
                     return None
-                is_file = resolved.is_file()
+                is_file = resolved_path.is_file()
             except (OSError, RuntimeError):
                 return None
-            if is_file and resolved not in resolved_files:
-                resolved_files.append(resolved)
+            if is_file and resolved_path not in resolved_files:
+                resolved_files.append(resolved_path)
         if len(resolved_files) != 1:
             return None
 

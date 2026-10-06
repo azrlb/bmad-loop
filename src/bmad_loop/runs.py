@@ -4232,6 +4232,101 @@ class _RearmJournal(Journal):
         self.hold_resume = holds or self.hold_resume
 
 
+@dataclass(frozen=True)
+class ReviewedEnvironmentRetry:
+    """Exact stopped-state contract; authority is verified by the external controller.
+
+    This mode retains an existing correction anchor, never introduces a new one
+    or accepts work. The native transaction only reopens the spec for review.
+    """
+
+    state_sha256: str
+    generation: int
+    head: str
+    proof_baseline: str
+    receipt_sha256: str
+
+
+def _environment_retry_receipt(run_dir, task, retry):
+    """Bind the journal identifier to actual owned receipt bytes, under the lock."""
+    receipt = run_dir / "reviewed-environment-retry" / retry.receipt_sha256 / "receipt.json"
+    try:
+        if receipt.resolve(strict=True) != receipt or not receipt.is_file():
+            raise ValueError("receipt is not a canonical regular file")
+        raw = receipt.read_bytes()
+        value = json.loads(raw)
+        expected = {
+            "schema": "bmad-reviewed-environment-recovery-v1",
+            "nativeRunId": run_dir.name,
+            "story": task.story_key,
+            "stateSha256": retry.state_sha256,
+            "generation": retry.generation,
+            "head": retry.head,
+            "proofBaseline": retry.proof_baseline,
+        }
+        if (
+            hashlib.sha256(raw).hexdigest() != retry.receipt_sha256
+            or not isinstance(value, dict)
+            or any(value.get(key) != item for key, item in expected.items())
+        ):
+            raise ValueError("receipt bytes or binding changed")
+    except (OSError, RuntimeError, ValueError, TypeError) as error:
+        raise RearmError("environment retry receipt missing or changed") from error
+
+
+def _validate_environment_retry(run_dir, state, task, retry, *, isolated_redrive):
+    if (
+        not isinstance(retry, ReviewedEnvironmentRetry)
+        or type(retry.generation) is not int
+        or retry.generation < 1
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{64}", value) is None
+            for value in (retry.state_sha256, retry.receipt_sha256)
+        )
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{40}", value) is None
+            for value in (retry.head, retry.proof_baseline)
+        )
+    ):
+        raise RearmError("environment retry contract is invalid")
+    if (
+        isolated_redrive
+        or task.worktree_path
+        or task.restore_patch
+        or state.source != "sprint-status"
+        or not task.spec_file
+        or state.paused_story_key != task.story_key
+        or task.generation != retry.generation
+        or task.baseline_commit != retry.head
+        or task.resolved_proof_baseline != retry.proof_baseline
+        or retry.head == retry.proof_baseline
+        or hashlib.sha256((run_dir / STATE_FILE).read_bytes()).hexdigest() != retry.state_sha256
+    ):
+        raise RearmError("environment retry state or retained correction anchor changed")
+    _environment_retry_receipt(run_dir, task, retry)
+    if engine_liveness(run_dir) != "dead":
+        raise RearmError("environment retry requires a provably stopped engine")
+    rc, status = verify._git_raw(
+        state.code_root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    )
+    if (
+        verify.rev_parse_head(state.code_root) != retry.head
+        or rc != 0
+        or status
+        or not verify.is_ancestor(state.code_root, retry.proof_baseline, retry.head)
+    ):
+        raise RearmError("environment retry requires the clean unchanged corrected commit")
+    spec = task_spec_path(task, state)
+    if (
+        spec is None
+        or not spec.is_file()
+        or spec.is_symlink()
+        or spec.resolve(strict=True) != spec
+        or not spec_reaches_the_redrive(task, state, isolated_redrive=False)
+    ):
+        raise RearmError("environment retry spec is not reachable")
+
+
 def rearm_escalation(
     run_dir: Path,
     story_key: str | None = None,
@@ -4241,8 +4336,14 @@ def rearm_escalation(
     resolution_recorded: bool,
     project_root: Path | None = None,
     reviewed_correction_base: str | None = None,
+    environment_retry: ReviewedEnvironmentRetry | None = None,
 ) -> RearmOutcome:
-    """Run the complete spec/git/state re-arm transaction under the run lock."""
+    """Run the complete spec/git/state re-arm transaction under the run lock.
+
+    ``environment_retry`` is a separate exact-state mode: retain an existing
+    independently approved correction anchor and reopen only review. It cannot
+    introduce a correction or accept work, and ordinary resolve stays unchanged.
+    """
     with state_lock(run_dir):
         return _rearm_escalation_locked(
             run_dir,
@@ -4252,6 +4353,7 @@ def rearm_escalation(
             resolution_recorded=resolution_recorded,
             project_root=project_root,
             reviewed_correction_base=reviewed_correction_base,
+            environment_retry=environment_retry,
         )
 
 
@@ -4264,6 +4366,7 @@ def _rearm_escalation_locked(
     resolution_recorded: bool,
     project_root: Path | None = None,
     reviewed_correction_base: str | None = None,
+    environment_retry: ReviewedEnvironmentRetry | None = None,
 ) -> RearmOutcome:
     """Re-arm an escalation-paused story so the next resume re-drives it.
 
@@ -4398,6 +4501,14 @@ def _rearm_escalation_locked(
         raise RearmError(f"run {run_dir.name} has no task for story {key}")
     if task.phase != Phase.ESCALATED:
         raise RearmError(f"story {key} is not escalated (phase: {task.phase})")
+    if environment_retry is not None:
+        if restore_patch is not None or reviewed_correction_base is not None or resolution_recorded:
+            raise RearmError(
+                "environment retry cannot replace correction or interactive resolution"
+            )
+        _validate_environment_retry(
+            run_dir, state, task, environment_retry, isolated_redrive=isolated_redrive
+        )
     # Patch-restore preconditions (T1 guard + spec-less wedge + worktree isolation),
     # rejected here before any task mutation so the escalation stays armed for a
     # corrected resolve. `cli._resolve_restore_patch` runs the same validator ahead
@@ -4580,7 +4691,9 @@ def _rearm_escalation_locked(
                 # table): patch-restore -> in-review -> step-04 (resume review on
                 # the restored diff); from-scratch -> ready-for-dev -> step-03
                 # (re-implement). Independent of the resolve agent having set it.
-                target_status = "in-review" if restore_patch else "ready-for-dev"
+                target_status = (
+                    "in-review" if restore_patch or environment_retry else "ready-for-dev"
+                )
                 # Whether the writes below are the copy the re-driven session actually
                 # reads. Hoisted out of the record's condition because TWO decisions turn on
                 # it, and only one of them used to: the warning below, and the flip's
@@ -4933,6 +5046,8 @@ def _rearm_escalation_locked(
             head = verify.rev_parse_head(repo)
             untracked = sorted(verify.untracked_files(repo) - stale_residue)
         except verify.GitError as e:
+            if environment_retry is not None:
+                raise RearmError("environment retry baseline verification failed") from e
             # `verify.GitError` is a TOTAL replacement for the `except Exception` that
             # stood here, not a narrowing that leaks: both calls go through `_run_git`,
             # which translates spawn (`GitSpawnError`), timeout (`GitTimeoutError`) and
@@ -4955,13 +5070,23 @@ def _rearm_escalation_locked(
             # product correction. Keep its original reference for the re-drive's
             # proof gate, without moving the rollback/finalization baseline.
             task.resolved_proof_baseline = (
-                old_baseline
-                if (reviewed_correction_base is not None and old_baseline != head
-                    and verify.is_ancestor(repo, old_baseline, head))
-                else None
+                environment_retry.proof_baseline
+                if environment_retry is not None
+                else (
+                    old_baseline
+                    if (
+                        reviewed_correction_base is not None
+                        and old_baseline is not None
+                        and old_baseline != head
+                        and verify.is_ancestor(repo, old_baseline, head)
+                    )
+                    else None
+                )
             )
             if reviewed_correction_base is not None and task.resolved_proof_baseline is None:
                 raise RearmError("reviewed correction has no reachable committed code base")
+            if environment_retry is not None and head != environment_retry.head:
+                raise RearmError("environment retry HEAD changed during rearm")
             task.baseline_untracked = untracked
             advanced = True
 
@@ -5090,6 +5215,35 @@ def _rearm_escalation_locked(
                         restore=bool(restore_patch),
                     )
 
+        if environment_retry is not None:
+            _environment_retry_receipt(run_dir, task, environment_retry)
+            expected_spec = task_spec_path(task, state)
+            rc, status = verify._git_raw(
+                repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+            )
+            if (
+                expected_spec is None
+                or not expected_spec.is_relative_to(repo)
+                or rc != 0
+                or status not in {"", " M " + expected_spec.relative_to(repo).as_posix() + "\0"}
+                or verify.rev_parse_head(repo) != environment_retry.head
+                or engine_liveness(run_dir) != "dead"
+                or hashlib.sha256((run_dir / STATE_FILE).read_bytes()).hexdigest()
+                != environment_retry.state_sha256
+            ):
+                raise RearmError("environment retry inputs changed during rearm")
+            # No product authority or completion watermark is introduced here.
+            # The original approved correction receipt remains the proof source.
+            journal.append(
+                "environment-review-rearm-intent",
+                story_key=key,
+                state_sha256=environment_retry.state_sha256,
+                old_generation=environment_retry.generation,
+                new_generation=task.generation,
+                commit=environment_retry.head,
+                proof_baseline=environment_retry.proof_baseline,
+                receipt_sha256=environment_retry.receipt_sha256,
+            )
         save_state(run_dir, state)
     except BaseException as e:
         # Roll the spec back to the bytes this re-arm found, record that it aborted, and

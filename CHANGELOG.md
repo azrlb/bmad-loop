@@ -9,6 +9,9 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- Add an exact-state environment-only retry mode that retains an existing reviewed
+  correction proof baseline and reopens review without reimplementation or acceptance.
+
 - **Journal-kind and refusal-site coverage gates.** `tests/test_portability_guard.py` gains
   three enumerate-vs-declare inventories: the 204 literal journal kinds (`JOURNAL_KINDS`,
   fed by a literal-kind emit that also sees kind-only writes, constructor-inline

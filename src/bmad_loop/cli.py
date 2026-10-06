@@ -3141,6 +3141,57 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
     pol = policy_mod.load(_policy_path(project))
 
+    environment_retry = None
+    if getattr(args, "reviewed_environment_retry", None) is not None:
+        if (
+            args.force
+            or args.interactive
+            or args.resume is not False
+            or args.restore_patch is not None
+            or getattr(args, "reviewed_correction_base", None) is not None
+        ):
+            print(
+                "environment retry requires --no-interactive --no-resume and no other recovery mode",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            packet = Path(args.reviewed_environment_retry)
+            value = json.loads(packet.read_text())
+            required = {
+                "schema",
+                "nativeRunId",
+                "story",
+                "stateSha256",
+                "generation",
+                "head",
+                "proofBaseline",
+                "receiptSha256",
+            }
+            if (
+                not isinstance(value, dict)
+                or set(value) != required
+                or value["schema"] != "bmad-native-environment-retry-v1"
+                or value["nativeRunId"] != run_dir.name
+                or value["story"] != story_key
+                or packet
+                != run_dir / "reviewed-environment-retry" / value["receiptSha256"] / "native.json"
+                or packet.resolve(strict=True) != packet
+                or state.project != str(project)
+                or state.code_root != project
+            ):
+                raise ValueError("environment retry packet is not bound to this run and project")
+            environment_retry = runs.ReviewedEnvironmentRetry(
+                value["stateSha256"],
+                value["generation"],
+                value["head"],
+                value["proofBaseline"],
+                value["receiptSha256"],
+            )
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            print(f"environment retry packet invalid: {error}", file=sys.stderr)
+            return 1
+
     # intent-gap patch-restore latch (#2564), explicit-flag path: everything about
     # it (isolation mode, path containment) is knowable NOW — validate before the
     # interactive resolve session, not after a whole agent conversation the abort
@@ -3424,6 +3475,11 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             if paths is not None:
                 if (moved := runs.restamp_code_root(run_dir, paths.repo_root)) is not None:
                     print(f"warning: {moved}", file=sys.stderr)
+            rearm_options: dict[str, Any] = {}
+            if getattr(args, "reviewed_correction_base", None):
+                rearm_options["reviewed_correction_base"] = args.reviewed_correction_base
+            if environment_retry is not None:
+                rearm_options["environment_retry"] = environment_retry
             outcome = runs.rearm_escalation(
                 run_dir,
                 story_key,
@@ -3435,8 +3491,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
                 # run was LAUNCHED and nothing re-stamps it, so a moved project would have
                 # the agent edit one file and the re-arm flip another.
                 project_root=project,
-                **({"reviewed_correction_base": args.reviewed_correction_base}
-                   if getattr(args, "reviewed_correction_base", None) else {}),
+                **rearm_options,
             )
     except runs.RearmError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -5043,8 +5098,14 @@ def main(argv: list[str] | None = None) -> int:
     resolve_p.add_argument("run_id")
     resolve_p.add_argument("--story", help="story key to resolve (default: the paused one)")
     resolve_p.add_argument(
-        "--reviewed-correction-base", metavar="SHA",
+        "--reviewed-correction-base",
+        metavar="SHA",
         help="original story commit for a separately reviewed, already-committed correction",
+    )
+    resolve_p.add_argument(
+        "--reviewed-environment-retry",
+        metavar="PATH",
+        help="exact-state environment-only retry packet; retain approved code lineage and reopen review",
     )
     resolve_p.add_argument(
         "--no-interactive",

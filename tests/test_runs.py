@@ -22,7 +22,7 @@ from bmad_loop.adapters import tmux_base
 from bmad_loop.adapters.multiplexer import MultiplexerError
 from bmad_loop.adapters.psmux_backend import PsmuxMultiplexer
 from bmad_loop.journal import load_state, save_state
-from bmad_loop.model import RunState
+from bmad_loop.model import Phase, RunState
 from bmad_loop.process_host import ProcessHost
 
 
@@ -3900,7 +3900,9 @@ def test_rearm_warns_about_commits_below_the_refreshed_baseline(tmp_path):
     old_baseline = load_state(run_dir).tasks["1-1-a"].baseline_commit
 
     outcome = runs.rearm_escalation(
-        run_dir, isolated_redrive=False, resolution_recorded=True,
+        run_dir,
+        isolated_redrive=False,
+        resolution_recorded=True,
         reviewed_correction_base=old_baseline,
     )
 
@@ -4789,7 +4791,9 @@ def test_reviewed_correction_base_cannot_authorize_unchanged_or_foreign_code(tmp
 
     with pytest.raises(runs.RearmError, match="no reachable committed code base"):
         runs.rearm_escalation(
-            run_dir, isolated_redrive=False, resolution_recorded=True,
+            run_dir,
+            isolated_redrive=False,
+            resolution_recorded=True,
             reviewed_correction_base=original,
         )
     assert (run_dir / journal_mod.STATE_FILE).read_bytes() == before
@@ -4797,11 +4801,251 @@ def test_reviewed_correction_base_cannot_authorize_unchanged_or_foreign_code(tmp
 
     with pytest.raises(runs.RearmError, match="does not match"):
         runs.rearm_escalation(
-            run_dir, isolated_redrive=False, resolution_recorded=True,
+            run_dir,
+            isolated_redrive=False,
+            resolution_recorded=True,
             reviewed_correction_base="f" * 40,
         )
     assert (run_dir / journal_mod.STATE_FILE).read_bytes() == before
     assert spec.read_bytes() == spec_before
+
+
+def _environment_retry_case(project):
+    import hashlib
+
+    spec = project / "environment-spec.md"
+    spec.write_text("---\nstatus: blocked\n---\n\nApproved story\n\n## Auto Run Result\nblocked\n")
+    git(project, "add", str(spec))
+    git(project, "commit", "-qm", "approved story")
+    original = git(project, "rev-parse", "HEAD")
+    (project / "environment_product.py").write_text("corrected = True\n")
+    git(project, "add", "environment_product.py")
+    git(project, "commit", "-qm", "approved product correction")
+    head = git(project, "rev-parse", "HEAD")
+    held = escalated_run(
+        project,
+        story_key="s1",
+        baseline_commit=head,
+        spec_file=str(spec),
+        with_session=True,
+        review_cycle=2,
+    )
+    held.task.generation = 1
+    held.task.resolved_proof_baseline = original
+    held.task.followup_reviews_spent = 1
+    save_state(held.run_dir, held.state)
+    state_sha = hashlib.sha256((held.run_dir / "state.json").read_bytes()).hexdigest()
+    receipt = json.dumps(
+        {
+            "schema": "bmad-reviewed-environment-recovery-v1",
+            "nativeRunId": held.run_dir.name,
+            "story": "s1",
+            "stateSha256": state_sha,
+            "generation": 1,
+            "head": head,
+            "proofBaseline": original,
+        }
+    ).encode()
+    receipt_sha = hashlib.sha256(receipt).hexdigest()
+    receipt_path = held.run_dir / "reviewed-environment-retry" / receipt_sha / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt)
+    retry = runs.ReviewedEnvironmentRetry(
+        hashlib.sha256((held.run_dir / "state.json").read_bytes()).hexdigest(),
+        1,
+        head,
+        original,
+        receipt_sha,
+    )
+    return held, spec, retry
+
+
+@pytest.mark.parametrize("change", ["missing", "modified", "digest", "symlink", "binding"])
+def test_environment_retry_refuses_unverified_receipt(project, change):
+    """Ablation target: remove _environment_retry_receipt validation calls."""
+    import hashlib
+    from dataclasses import replace
+
+    held, spec, retry = _environment_retry_case(project.project)
+    receipt = held.run_dir / "reviewed-environment-retry" / retry.receipt_sha256 / "receipt.json"
+    if change == "missing":
+        receipt.unlink()
+    elif change == "modified":
+        receipt.write_bytes(receipt.read_bytes() + b" ")
+    elif change == "digest":
+        retry = replace(retry, receipt_sha256="f" * 64)
+    elif change == "symlink":
+        target = receipt.with_name("other.json")
+        receipt.rename(target)
+        receipt.symlink_to(target)
+    else:
+        value = json.loads(receipt.read_bytes())
+        value["story"] = "foreign-story"
+        raw = json.dumps(value).encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        other = receipt.parent.parent / digest / "receipt.json"
+        other.parent.mkdir()
+        other.write_bytes(raw)
+        retry = replace(retry, receipt_sha256=digest)
+    before = (held.run_dir / "state.json").read_bytes()
+    spec_before = spec.read_bytes()
+    with pytest.raises(runs.RearmError, match="receipt missing or changed"):
+        runs.rearm_escalation(
+            held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+        )
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == spec_before
+
+
+def test_environment_retry_retains_approved_code_and_sessions_but_reopens_fresh_review(project):
+    project = project.project
+    held, spec, retry = _environment_retry_case(project)
+    sessions = held.task.sessions
+    result = runs.rearm_escalation(
+        held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+    )
+    task = load_state(held.run_dir).tasks["s1"]
+    assert result.story_key == "s1"
+    assert task.phase == Phase.PENDING and task.generation == 2 and task.rearmed
+    assert task.baseline_commit == retry.head
+    assert task.resolved_proof_baseline == retry.proof_baseline
+    assert task.sessions == sessions
+    assert task.review_cycle == 0 and task.followup_reviews_spent == 0
+    assert task.restore_patch is None and task.commit_sha is None
+    assert git(project, "rev-parse", "HEAD") == retry.head
+    assert (project / "environment_product.py").read_text() == "corrected = True\n"
+    assert "status: in-review" in spec.read_text()
+    assert "## Auto Run Result" not in spec.read_text()
+    (entry,) = _kinds(held.run_dir, "environment-review-rearm-intent")
+    assert entry["old_generation"] == 1 and entry["new_generation"] == 2
+    assert entry["proof_baseline"] == retry.proof_baseline
+    assert entry["state_sha256"] == retry.state_sha256
+    assert entry["receipt_sha256"] == retry.receipt_sha256
+
+
+@pytest.mark.parametrize(
+    "change", ["modified", "staged", "deleted", "untracked", "policy", "commit"]
+)
+def test_environment_retry_refuses_any_unclean_or_changed_candidate(project, change):
+    """Ablation target: remove the clean/head checks from _validate_environment_retry."""
+    project = project.project
+    held, spec, retry = _environment_retry_case(project)
+    if change == "untracked":
+        (project / "unexpected.txt").write_text("new product work")
+    elif change == "policy":
+        policy = project / ".bmad-loop" / "policy.toml"
+        policy.write_text("# changed runtime policy\n")
+        git(project, "add", "--force", str(policy))
+    elif change == "deleted":
+        (project / "environment_product.py").unlink()
+    else:
+        (project / "environment_product.py").write_text("unreviewed = True\n")
+        if change in {"staged", "commit"}:
+            git(project, "add", "environment_product.py")
+        if change == "commit":
+            git(project, "commit", "-qm", "unreviewed change")
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    with pytest.raises(runs.RearmError, match="clean unchanged corrected commit"):
+        runs.rearm_escalation(
+            held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+        )
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
+@pytest.mark.parametrize(
+    "change", ["hash", "generation", "anchor", "baseline", "source", "paused_story"]
+)
+def test_environment_retry_refuses_stale_state_or_foreign_lineage(project, change):
+    """Ablation target: remove the exact-state/retained-anchor predicate."""
+    project = project.project
+    from dataclasses import replace
+
+    held, spec, retry = _environment_retry_case(project)
+    if change == "hash":
+        retry = replace(retry, state_sha256="f" * 64)
+    elif change == "generation":
+        retry = replace(retry, generation=2)
+    elif change == "anchor":
+        retry = replace(retry, proof_baseline="f" * 40)
+    elif change == "baseline":
+        retry = replace(retry, head=retry.proof_baseline)
+    else:
+        if change == "source":
+            held.state.source = "stories"
+        else:
+            held.state.paused_story_key = "another-task"
+        save_state(held.run_dir, held.state)
+        import hashlib
+
+        retry = replace(
+            retry,
+            state_sha256=hashlib.sha256((held.run_dir / "state.json").read_bytes()).hexdigest(),
+        )
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    with pytest.raises(runs.RearmError, match="state or retained correction anchor changed"):
+        runs.rearm_escalation(
+            held.run_dir,
+            "s1",
+            isolated_redrive=False,
+            resolution_recorded=False,
+            environment_retry=retry,
+        )
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
+@pytest.mark.parametrize("liveness", ["alive", "unknown"])
+def test_environment_retry_refuses_live_or_uncertain_owner(project, monkeypatch, liveness):
+    """Ablation target: remove stopped-engine check in _validate_environment_retry."""
+    project = project.project
+    held, spec, retry = _environment_retry_case(project)
+    monkeypatch.setattr(runs, "engine_liveness", lambda _: liveness)
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    with pytest.raises(runs.RearmError, match="provably stopped engine"):
+        runs.rearm_escalation(
+            held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+        )
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
+def test_environment_retry_failure_rolls_back_spec_and_preserves_escalation(project, monkeypatch):
+    project = project.project
+    held, spec, retry = _environment_retry_case(project)
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+
+    def fail_save(*_):
+        raise OSError("simulated state publication failure")
+
+    monkeypatch.setattr(runs, "save_state", fail_save)
+    with pytest.raises(OSError, match="state publication failure"):
+        runs.rearm_escalation(
+            held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+        )
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
+def test_environment_retry_replay_does_not_bump_generation_twice(project):
+    project = project.project
+    held, spec, retry = _environment_retry_case(project)
+    runs.rearm_escalation(
+        held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+    )
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    with pytest.raises(runs.RearmError, match="not escalated"):
+        runs.rearm_escalation(
+            held.run_dir, isolated_redrive=False, resolution_recorded=False, environment_retry=retry
+        )
+    assert load_state(held.run_dir).tasks["s1"].generation == 2
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
 
 
 def test_archive_run(tmp_path):

@@ -2523,6 +2523,159 @@ def test_resolve_no_such_run(tmp_path, capsys):
     assert "no such run" in capsys.readouterr().err
 
 
+def _environment_retry_cli_case(paths):
+    import hashlib
+
+    from bmad_loop.journal import save_state
+
+    root = paths.project
+    spec = root / "environment-spec.md"
+    spec.write_text("---\nstatus: blocked\n---\n\nApproved implementation\n")
+    git(root, "add", str(spec))
+    git(root, "commit", "-qm", "approved story")
+    original = git(root, "rev-parse", "HEAD")
+    (root / "environment_product.py").write_text("corrected = True\n")
+    git(root, "add", "environment_product.py")
+    git(root, "commit", "-qm", "approved correction")
+    head = git(root, "rev-parse", "HEAD")
+    held = escalated_run(root, baseline_commit=head, spec_file=str(spec))
+    held.task.generation = 1
+    held.task.resolved_proof_baseline = original
+    save_state(held.run_dir, held.state)
+    state_sha = hashlib.sha256((held.run_dir / "state.json").read_bytes()).hexdigest()
+    receipt = json.dumps(
+        {
+            "schema": "bmad-reviewed-environment-recovery-v1",
+            "nativeRunId": "r1",
+            "story": "s1",
+            "stateSha256": state_sha,
+            "generation": 1,
+            "head": head,
+            "proofBaseline": original,
+        }
+    ).encode()
+    receipt_sha = hashlib.sha256(receipt).hexdigest()
+    packet = held.run_dir / "reviewed-environment-retry" / receipt_sha / "native.json"
+    packet.parent.mkdir(parents=True)
+    (packet.parent / "receipt.json").write_bytes(receipt)
+    packet.write_text(
+        json.dumps(
+            {
+                "schema": "bmad-native-environment-retry-v1",
+                "nativeRunId": "r1",
+                "story": "s1",
+                "stateSha256": hashlib.sha256(
+                    (held.run_dir / "state.json").read_bytes()
+                ).hexdigest(),
+                "generation": 1,
+                "head": head,
+                "proofBaseline": original,
+                "receiptSha256": receipt_sha,
+            }
+        )
+    )
+    argv = [
+        "resolve",
+        "r1",
+        "--project",
+        str(root),
+        "--story",
+        "s1",
+        "--no-interactive",
+        "--no-resume",
+        "--reviewed-environment-retry",
+        str(packet),
+    ]
+    return held, spec, packet, argv
+
+
+def test_resolve_environment_retry_rearms_review_without_launching_worker(project, monkeypatch):
+    from bmad_loop.journal import load_state
+
+    held, spec, _, argv = _environment_retry_cli_case(project)
+
+    def forbidden_resume(*_):
+        pytest.fail("environment rearm must not launch a worker")
+
+    monkeypatch.setattr(cli, "_resume_paused_run", forbidden_resume)
+    assert cli.main(argv) == 0
+    task = load_state(held.run_dir).tasks["s1"]
+    assert task.generation == 2
+    assert task.resolved_proof_baseline == held.task.resolved_proof_baseline
+    assert "status: in-review" in spec.read_text()
+
+
+@pytest.mark.parametrize("change", ["missing", "modified", "symlink"])
+def test_resolve_environment_retry_refuses_changed_receipt(project, change, capsys):
+    held, spec, packet, argv = _environment_retry_cli_case(project)
+    receipt = packet.parent / "receipt.json"
+    if change == "missing":
+        receipt.unlink()
+    elif change == "modified":
+        receipt.write_bytes(receipt.read_bytes() + b" ")
+    else:
+        target = receipt.with_name("other.json")
+        receipt.rename(target)
+        receipt.symlink_to(target)
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    assert cli.main(argv) == 1
+    assert "receipt missing or changed" in capsys.readouterr().err
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--force", "--resume", "--interactive", "--reviewed-correction-base", "--restore-patch"],
+)
+def test_resolve_environment_retry_refuses_mixed_recovery_modes(project, flag, capsys, monkeypatch):
+    """Ablation target: remove the environment mode exclusivity check in cmd_resolve."""
+    held, spec, _, argv = _environment_retry_cli_case(project)
+
+    def forbidden_effect(*_, **__):
+        pytest.fail("mixed recovery may not resolve interactively or start a worker")
+
+    monkeypatch.setattr(cli.resolve, "run_session", forbidden_effect)
+    monkeypatch.setattr(cli, "_resume_paused_run", forbidden_effect)
+    if flag == "--interactive":
+        argv.remove("--no-interactive")
+    elif flag in {"--reviewed-correction-base", "--restore-patch"}:
+        argv.extend([flag, "f" * 40])
+    else:
+        argv.append(flag)
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    assert cli.main(argv) == 1
+    assert "environment retry requires" in capsys.readouterr().err
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
+@pytest.mark.parametrize("change", ["story", "nativeRunId", "location", "symlink"])
+def test_resolve_environment_retry_refuses_unbound_packet(project, change, capsys):
+    """Ablation target: remove native packet owner/location checks in cmd_resolve."""
+    held, spec, packet, argv = _environment_retry_cli_case(project)
+    if change in {"story", "nativeRunId"}:
+        value = json.loads(packet.read_text())
+        value[change] = "another-owner"
+        packet.write_text(json.dumps(value))
+    else:
+        other = packet.parent / "unowned.json"
+        if change == "location":
+            other.write_bytes(packet.read_bytes())
+            argv[-1] = str(other)
+        else:
+            packet.rename(other)
+            packet.symlink_to(other)
+    before = (held.run_dir / "state.json").read_bytes()
+    story = spec.read_bytes()
+    assert cli.main(argv) == 1
+    assert "environment retry packet invalid" in capsys.readouterr().err
+    assert (held.run_dir / "state.json").read_bytes() == before
+    assert spec.read_bytes() == story
+
+
 def test_resolve_rejects_non_escalation_stage(tmp_path, capsys):
     _make_run_with_state(tmp_path, "r1", paused_stage="spec-approval", paused_reason="x")
     assert cli.main(["resolve", "--project", str(tmp_path), "r1"]) == 1

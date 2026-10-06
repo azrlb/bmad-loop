@@ -805,6 +805,30 @@ def test_non_string_sentinel_is_safely_pseudonymized():
     assert pseudo.entries() == [("spec", str(raw), scrubbed["sentinel"])]
 
 
+def test_environment_retry_proof_identifiers_are_pseudonymized_but_generations_remain():
+    """Ablation target: remove environment-review-rearm-intent's alias routes."""
+    entry = {
+        "kind": "environment-review-rearm-intent",
+        "commit": "a" * 40,
+        "proof_baseline": "b" * 40,
+        "state_sha256": "c" * 64,
+        "receipt_sha256": "d" * 64,
+        "old_generation": 1,
+        "new_generation": 2,
+    }
+    pseudo = sanitize.Pseudonymizer(salt=b"fixed")
+    scrubbed = diagnostics._scrub_entry(entry, pseudo, {}, None)
+    for key in ("commit", "proof_baseline"):
+        assert scrubbed[key].startswith("commit-")
+    for key in ("state_sha256", "receipt_sha256"):
+        assert scrubbed[key].startswith("evidence-")
+    assert scrubbed["old_generation"] == 1 and scrubbed["new_generation"] == 2
+    assert all(
+        entry[key] not in json.dumps(scrubbed)
+        for key in ("commit", "proof_baseline", "state_sha256", "receipt_sha256")
+    )
+
+
 def test_journal_alias_routes_accept_lone_unicode_surrogates(project):
     run_dir = _seed_run(project.project)
     sentinel_value = chr(0xDC80)
